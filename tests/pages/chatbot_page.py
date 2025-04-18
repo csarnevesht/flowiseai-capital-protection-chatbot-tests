@@ -4,6 +4,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 import time
+from selenium.common.exceptions import TimeoutException
 
 class ChatbotPage:
     # Locators
@@ -269,85 +270,242 @@ class ChatbotPage:
             self.driver.save_screenshot("chat_input_error.png")
             raise
     
-    def send_message(self, message):
-        """Send a message to the chatbot"""
+    def analyze_chat_interface(self):
+        """Analyze the structure of the chat interface for debugging."""
+        print("\n=== Analyzing Chat Interface Structure ===")
         try:
-            chat_input = self.wait_for_chat_input()
+            shadow_root = self.get_shadow_root()
+            if not shadow_root:
+                print("No shadow root found")
+                return
             
-            # Try to send message using JavaScript
-            script = """
-                const input = arguments[0];
-                const message = arguments[1];
+            # Get all elements in the shadow root
+            elements = shadow_root.find_elements(By.CSS_SELECTOR, "*")
+            print(f"\nFound {len(elements)} elements in shadow root:")
+            
+            for element in elements:
+                try:
+                    tag_name = element.tag_name
+                    text = element.text
+                    classes = element.get_attribute("class")
+                    id_attr = element.get_attribute("id")
+                    role = element.get_attribute("role")
+                    
+                    print(f"\nElement: {tag_name}")
+                    if id_attr:
+                        print(f"ID: {id_attr}")
+                    if classes:
+                        print(f"Classes: {classes}")
+                    if role:
+                        print(f"Role: {role}")
+                    if text:
+                        print(f"Text: {text}")
+                except:
+                    continue
+                    
+        except Exception as e:
+            print(f"Error analyzing chat interface: {str(e)}")
+    
+    def _wait_for_chat_interface(self):
+        """Wait for the chat interface to be ready."""
+        print("\nWaiting for chat interface to load...")
+        try:
+            shadow_root = self.get_shadow_root()
+            WebDriverWait(self.driver, 10).until(
+                lambda x: shadow_root and shadow_root.find_elements(By.CSS_SELECTOR, ".chat-container")
+            )
+            print("Chat interface loaded successfully")
+        except TimeoutException:
+            print("Warning: Timeout waiting for chat interface")
+        except Exception as e:
+            print(f"Error waiting for chat interface: {str(e)}")
+
+    def send_message(self, message):
+        """Send a message in the chat interface."""
+        print(f"\n=== Starting message send process ===")
+        print(f"Attempting to send message: {message}")
+        
+        try:
+            # Wait longer for initial chat interface load
+            time.sleep(3)
+            
+            shadow_root = self.get_shadow_root()
+            if not shadow_root:
+                raise Exception("Shadow root not found")
+
+            # Find and fill the message input with retry logic
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    # Try different selectors for the input field
+                    selectors = [
+                        "textarea.text-input",  # More specific for Flowise
+                        "textarea[class*='text-input']",
+                        "textarea",
+                        "input[type='text']",
+                        "[contenteditable='true']",
+                        "[role='textbox']"
+                    ]
+                    
+                    message_input = None
+                    for selector in selectors:
+                        try:
+                            elements = shadow_root.find_elements(By.CSS_SELECTOR, selector)
+                            for element in elements:
+                                if element.is_displayed():
+                                    message_input = element
+                                    print(f"Found input field with selector: {selector}")
+                                    break
+                            if message_input:
+                                break
+                        except:
+                            continue
+                    
+                    if not message_input:
+                        raise Exception("Message input not found")
+                    
+                    # Clear and fill the input
+                    message_input.clear()
+                    message_input.send_keys(message)
+                    time.sleep(0.5)  # Wait for input to register
+                    
+                    # Verify the message was entered correctly
+                    input_value = self.driver.execute_script("""
+                        const el = arguments[0];
+                        return el.value || el.textContent;
+                    """, message_input)
+                    
+                    if message not in input_value:
+                        raise Exception("Message not entered correctly")
+                    
+                    break
+                except Exception as e:
+                    if attempt == max_attempts - 1:
+                        raise
+                    print(f"Attempt {attempt + 1} failed: {str(e)}")
+                    time.sleep(1)
+            
+            # Find and click the send button using JavaScript
+            print("Looking for send button...")
+            send_button = self.driver.execute_script("""
+                const shadowHost = document.querySelector('flowise-fullchatbot');
+                if (!shadowHost || !shadowHost.shadowRoot) {
+                    console.log('No shadow host or root found');
+                    return null;
+                }
                 
-                // Function to try setting value and dispatching events
-                const trySetValue = (method, value) => {
-                    try {
-                        input[method] = value;
-                        input.dispatchEvent(new Event('input', { bubbles: true }));
-                        input.dispatchEvent(new Event('change', { bubbles: true }));
-                        return true;
-                    } catch (e) {
-                        console.log(`Failed to set value using ${method}:`, e);
+                const root = shadowHost.shadowRoot;
+                
+                // Find the button with the send icon
+                const buttons = Array.from(root.querySelectorAll('button'));
+                const sendButton = buttons.find(btn => {
+                    // Check if button contains an SVG with send-icon class
+                    const svg = btn.querySelector('svg.send-icon');
+                    if (!svg) return false;
+                    
+                    // Check if button is visible and enabled
+                    const style = window.getComputedStyle(btn);
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
                         return false;
                     }
-                };
-                
-                // Try different methods of setting the value
-                const methods = ['value', 'textContent', 'innerHTML'];
-                let success = false;
-                
-                for (const method of methods) {
-                    if (trySetValue(method, message)) {
-                        success = true;
-                        break;
-                    }
-                }
-                
-                if (!success) {
-                    // If all methods failed, try using execCommand
-                    try {
-                        input.focus();
-                        document.execCommand('insertText', false, message);
-                        success = true;
-                    } catch (e) {
-                        console.log('Failed to set value using execCommand:', e);
-                    }
-                }
-                
-                // Simulate Enter key press
-                const enterEvent = new KeyboardEvent('keydown', {
-                    key: 'Enter',
-                    code: 'Enter',
-                    keyCode: 13,
-                    which: 13,
-                    bubbles: true
+                    if (btn.disabled) return false;
+                    
+                    return true;
                 });
-                input.dispatchEvent(enterEvent);
                 
-                return success;
-            """
+                if (sendButton) {
+                    console.log('Found send button with SVG');
+                    return sendButton;
+                }
+                
+                // If not found, try finding any visible button
+                const visibleButton = buttons.find(btn => {
+                    const style = window.getComputedStyle(btn);
+                    return style.display !== 'none' && 
+                           style.visibility !== 'hidden' && 
+                           style.opacity !== '0' &&
+                           !btn.disabled;
+                });
+                
+                if (visibleButton) {
+                    console.log('Found visible button as fallback');
+                    return visibleButton;
+                }
+                
+                console.log('No suitable button found');
+                return null;
+            """)
             
-            success = self.driver.execute_script(script, chat_input, message)
+            if not send_button:
+                print("\nAnalyzing shadow root structure for debugging:")
+                self.analyze_chat_interface()
+                raise Exception("Send button not found with any selector")
             
-            if not success:
-                raise Exception("Failed to send message using JavaScript")
+            # Click the button using JavaScript for better reliability
+            print("Clicking send button...")
+            self.driver.execute_script("""
+                const button = arguments[0];
+                // First try standard click
+                button.click();
+                // Then try dispatching click event
+                button.dispatchEvent(new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                }));
+            """, send_button)
+            time.sleep(1)  # Wait after click
             
-            return self
+            # Verify message was sent
+            print("Message sent, waiting for it to appear...")
+            time.sleep(2)  # Initial wait for message processing
+            
+            # Verify message was sent
+            if not self.get_sent_message(message):
+                print("Message not immediately visible, performing extended check...")
+                time.sleep(2)  # Additional wait
+                if not self.get_sent_message(message):
+                    print("Warning: Message may not have been sent successfully")
+                    return False
+            
+            print("Message sent and verified successfully")
+            return True
             
         except Exception as e:
             print(f"Error sending message: {str(e)}")
             self.driver.save_screenshot("send_message_error.png")
-            raise
+            return False
     
     def get_sent_message(self, message_text):
-        """Get the sent message element"""
-        try:
-            shadow_root = self.get_shadow_root()
-            return shadow_root.find_element(By.XPATH, f".//*[contains(text(), '{message_text}')]")
-        except Exception as e:
-            print(f"Error finding sent message: {str(e)}")
-            self.driver.save_screenshot("sent_message_error.png")
-            raise
+        """Get the sent message element with retry logic"""
+        print(f"\nLooking for sent message: {message_text}")
+        
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            try:
+                # First try exact message match
+                if self.is_message_visible(message_text):
+                    print(f"Found message on attempt {attempt + 1}")
+                    return True
+                
+                # If exact match fails, try analyzing the interface
+                if attempt % 2 == 0:  # Analyze every other attempt
+                    self.analyze_chat_interface()
+                
+                # Wait before next attempt
+                if attempt < max_attempts - 1:
+                    time.sleep(1)
+                    
+            except Exception as e:
+                print(f"Error on attempt {attempt + 1}: {str(e)}")
+                if attempt == max_attempts - 1:
+                    print("All attempts to find message failed")
+                    self.driver.save_screenshot("find_message_error.png")
+                    return False
+                time.sleep(1)
+        
+        print("Message not found after all attempts")
+        return False
     
     def get_chatbot_response(self):
         """Get the chatbot's response element"""
@@ -367,11 +525,77 @@ class ChatbotPage:
             return False
     
     def is_message_visible(self, message_text):
-        """Check if a specific message is visible"""
-        try:
-            return self.get_sent_message(message_text).is_displayed()
-        except:
-            return False
+        """
+        Check if a specific message is visible in the chat interface.
+        
+        Args:
+            message_text (str): The text of the message to look for
+            
+        Returns:
+            bool: True if the message is found, False otherwise
+        """
+        print(f"\nChecking if message is visible: {message_text}")
+        max_attempts = 5
+        attempt = 1
+        
+        while attempt <= max_attempts:
+            try:
+                # Get the shadow root
+                shadow_host = self.driver.find_element(By.TAG_NAME, "flowise-fullchatbot")
+                shadow_root = shadow_host.shadow_root
+                
+                # Find the chat view container
+                chat_view = shadow_root.find_element(By.CLASS_NAME, "chatbot-chat-view")
+                
+                # Look for user messages with various possible class combinations
+                user_message_selectors = [
+                    "div.flex.flex-row.justify-end",  # User message container
+                    "div[class*='flex'][class*='justify-end']",
+                    "div[class*='user-message']",
+                    "div[class*='user-bubble']",
+                    "span[class*='user-bubble']",
+                    "span[class*='chatbot-user-bubble']",
+                    "div[class*='flex'][class*='justify-end'] span"  # Text within user message
+                ]
+                
+                # Try each selector
+                for selector in user_message_selectors:
+                    try:
+                        elements = chat_view.find_elements(By.CSS_SELECTOR, selector)
+                        for element in elements:
+                            if message_text in element.text:
+                                print(f"Found message with selector: {selector}")
+                                return True
+                    except:
+                        continue
+                
+                # If not found with specific selectors, search all elements
+                print("\nSearching all elements in chat view...")
+                all_elements = chat_view.find_elements(By.XPATH, ".//*")
+                for element in all_elements:
+                    try:
+                        if message_text in element.text:
+                            print(f"\nFound message in element:")
+                            print(f"Tag: {element.tag_name}")
+                            print(f"Classes: {element.get_attribute('class')}")
+                            print(f"Text: {element.text}")
+                            return True
+                    except:
+                        continue
+                
+                if attempt < max_attempts:
+                    print(f"Message not found, waiting and retrying... (Attempt {attempt + 1}/{max_attempts})")
+                    time.sleep(2)
+                attempt += 1
+                
+            except Exception as e:
+                print(f"Error checking message visibility: {str(e)}")
+                if attempt < max_attempts:
+                    time.sleep(2)
+                attempt += 1
+        
+        print("Message not found after all attempts")
+        return False
     
     def is_chatbot_response_visible(self):
         """Check if chatbot response is visible"""
